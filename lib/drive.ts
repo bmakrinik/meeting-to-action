@@ -1,0 +1,262 @@
+import fs from "node:fs";
+import path from "node:path";
+import { google, drive_v3 } from "googleapis";
+import { db } from "./db";
+import { recordingsFolderIds } from "./settings";
+
+// A meeting file to process, abstracted over "real Drive" vs "local fixture" sources.
+export interface MeetingFile {
+  id: string; // Drive file id, or "local:<filename>" for fixtures
+  name: string;
+  source: "drive" | "local";
+  localPath?: string; // populated for fixtures
+  createdTime?: string; // ISO; when the recording was created (~ meeting time)
+  folderId?: string; // the Drive folder it was found in (for audio retain-upload)
+}
+
+const WORK_DIR = process.env.WORK_DIR || path.join(process.cwd(), "data", "work");
+fs.mkdirSync(WORK_DIR, { recursive: true });
+
+function isProcessed(fileId: string): boolean {
+  const row = db()
+    .prepare("SELECT 1 FROM processed_files WHERE file_id = ?")
+    .get(fileId);
+  return !!row;
+}
+
+// ---------- Local fixture mode (no Drive credentials needed) ----------
+
+function listLocalFixtures(): MeetingFile[] {
+  const dir = process.env.LOCAL_FIXTURE_DIR;
+  if (!dir || !fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.toLowerCase().endsWith(".mp4"))
+    .map((f) => {
+      const full = path.join(dir, f);
+      return {
+        id: `local:${f}`,
+        name: f,
+        source: "local" as const,
+        localPath: full,
+        createdTime: safeMtime(full),
+      };
+    });
+}
+
+// File mtime as ISO, best-effort (used as the meeting time for local fixtures).
+function safeMtime(p: string): string | undefined {
+  try {
+    return fs.statSync(p).mtime.toISOString();
+  } catch {
+    return undefined;
+  }
+}
+
+// ---------- Google Drive mode ----------
+
+function driveClient(): drive_v3.Drive {
+  const credPath = process.env.GOOGLE_CREDENTIALS_PATH;
+  if (!credPath || !fs.existsSync(credPath)) {
+    throw new Error(
+      "GOOGLE_CREDENTIALS_PATH not set or file missing. Set LOCAL_FIXTURE_DIR to test without Drive."
+    );
+  }
+  const creds = JSON.parse(fs.readFileSync(credPath, "utf8"));
+
+  // Support a service-account JSON directly.
+  if (creds.type === "service_account") {
+    const auth = new google.auth.GoogleAuth({
+      credentials: creds,
+      scopes: ["https://www.googleapis.com/auth/drive"],
+    });
+    return google.drive({ version: "v3", auth: auth as any });
+  }
+
+  // Otherwise treat as an OAuth client; reuse a cached token if present.
+  const { client_id, client_secret, redirect_uris } =
+    creds.installed || creds.web || creds;
+  const oauth = new google.auth.OAuth2(
+    client_id,
+    client_secret,
+    redirect_uris?.[0]
+  );
+  const tokenPath = process.env.GOOGLE_TOKEN_PATH;
+  if (tokenPath && fs.existsSync(tokenPath)) {
+    oauth.setCredentials(JSON.parse(fs.readFileSync(tokenPath, "utf8")));
+  } else {
+    throw new Error(
+      "OAuth token missing. Complete the Google OAuth flow and save the token to GOOGLE_TOKEN_PATH."
+    );
+  }
+  return google.drive({ version: "v3", auth: oauth });
+}
+
+async function listDriveFiles(): Promise<MeetingFile[]> {
+  const folderIds = recordingsFolderIds();
+  if (!folderIds.length)
+    throw new Error("No Meet Recordings folder configured (Settings or env).");
+  const drive = driveClient();
+  const out: MeetingFile[] = [];
+  for (const folderId of folderIds) {
+    let pageToken: string | undefined;
+    do {
+      const res = await drive.files.list({
+        q: `'${folderId}' in parents and mimeType = 'video/mp4' and trashed = false`,
+        fields: "nextPageToken, files(id, name, createdTime)",
+        orderBy: "createdTime",
+        pageSize: 100,
+        // Required so a folder living in a Shared Drive is traversed.
+        supportsAllDrives: true,
+        includeItemsFromAllDrives: true,
+        pageToken,
+      });
+      for (const f of res.data.files || [])
+        out.push({
+          id: f.id!,
+          name: f.name || f.id!,
+          source: "drive" as const,
+          createdTime: f.createdTime || undefined,
+          folderId,
+        });
+      pageToken = res.data.nextPageToken || undefined;
+    } while (pageToken);
+  }
+  return out;
+}
+
+// Resolve the meeting time for a file: use the known createdTime if present, otherwise
+// fetch it (Drive) or stat it (local). Falls back to undefined if unavailable.
+export async function meetingTime(file: MeetingFile): Promise<string | undefined> {
+  if (file.createdTime) return file.createdTime;
+  if (file.source === "local") {
+    return file.localPath ? safeMtime(file.localPath) : undefined;
+  }
+  try {
+    const res = await driveClient().files.get({
+      fileId: file.id,
+      fields: "createdTime",
+      supportsAllDrives: true,
+    });
+    return res.data.createdTime || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ---------- Public API ----------
+
+// New, unprocessed meeting files (Drive or local fixtures), oldest first.
+export async function listNew(): Promise<MeetingFile[]> {
+  const all =
+    process.env.LOCAL_FIXTURE_DIR && process.env.LOCAL_FIXTURE_DIR.length > 0
+      ? listLocalFixtures()
+      : await listDriveFiles();
+  return all.filter((f) => !isProcessed(f.id));
+}
+
+// Download (or copy) an MP4 to the work dir and return its local path.
+export async function download(file: MeetingFile): Promise<string> {
+  if (file.source === "local") {
+    return file.localPath!;
+  }
+  const dest = path.join(WORK_DIR, `${file.id}.mp4`);
+  const drive = driveClient();
+  const res = await drive.files.get(
+    { fileId: file.id, alt: "media", supportsAllDrives: true },
+    { responseType: "stream" }
+  );
+  await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(dest);
+    (res.data as NodeJS.ReadableStream)
+      .on("end", () => resolve())
+      .on("error", reject)
+      .pipe(out);
+  });
+  return dest;
+}
+
+// Move the source MP4 to trash. No-op for local fixtures (we never delete the user's test files).
+export async function trash(file: MeetingFile): Promise<void> {
+  if (file.source === "local") return;
+  await trashById(file.id);
+}
+
+// Trash any Drive file by id (used by the retention sweep).
+export async function trashById(fileId: string): Promise<void> {
+  await driveClient().files.update({
+    fileId,
+    requestBody: { trashed: true },
+    supportsAllDrives: true,
+  });
+}
+
+export interface DriveFileInfo {
+  id: string;
+  name: string;
+  mimeType: string;
+  createdTime?: string;
+}
+
+// List every (non-trashed) file in a folder, across Shared Drives.
+export async function listFolderFiles(folderId: string): Promise<DriveFileInfo[]> {
+  const drive = driveClient();
+  const out: DriveFileInfo[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: "nextPageToken, files(id, name, mimeType, createdTime)",
+      pageSize: 200,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      pageToken,
+    });
+    for (const f of res.data.files || [])
+      out.push({
+        id: f.id!,
+        name: f.name || f.id!,
+        mimeType: f.mimeType || "",
+        createdTime: f.createdTime || undefined,
+      });
+    pageToken = res.data.nextPageToken || undefined;
+  } while (pageToken);
+  return out;
+}
+
+// Does a file with this exact name already exist in the folder?
+export async function fileExistsInFolder(folderId: string, name: string): Promise<boolean> {
+  const res = await driveClient().files.list({
+    q: `'${folderId}' in parents and name = '${name.replace(/'/g, "\\'")}' and trashed = false`,
+    fields: "files(id)",
+    pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  return (res.data.files || []).length > 0;
+}
+
+// Upload an audio file into the folder (the small archival copy of a meeting).
+export async function uploadAudio(
+  folderId: string,
+  name: string,
+  localPath: string
+): Promise<string> {
+  const res = await driveClient().files.create({
+    requestBody: { name, parents: [folderId], mimeType: "audio/mp4" },
+    media: { mimeType: "audio/mp4", body: fs.createReadStream(localPath) },
+    fields: "id",
+    supportsAllDrives: true,
+  });
+  return res.data.id!;
+}
+
+export function markProcessed(file: MeetingFile): void {
+  db()
+    .prepare(
+      `INSERT INTO processed_files (file_id, file_name, processed_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(file_id) DO NOTHING`
+    )
+    .run(file.id, file.name, new Date().toISOString());
+}
