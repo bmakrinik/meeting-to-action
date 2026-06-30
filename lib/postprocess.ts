@@ -323,11 +323,13 @@ export async function run(
     settings.postprocessModel
   );
 
-  // Cleaning runs chunk-by-chunk and is concatenated, so length is unbounded.
+  // Cleaning runs chunk-by-chunk and is concatenated, so length is unbounded. It's a
+  // mechanical pass, so it uses the cheaper cleanModel (falls back to the analysis model).
+  const cleanModel = settings.cleanModel || settings.postprocessModel;
   const chunks = splitForCleaning(transcript);
   const cleanedParts: string[] = [];
   for (const c of chunks) {
-    cleanedParts.push(await cleanChunk(c, glossary, knownTerms, settings.postprocessModel));
+    cleanedParts.push(await cleanChunk(c, glossary, knownTerms, cleanModel));
   }
   // Deterministic post-pass: guarantee exact glossary replacements and filler removal that
   // the LLM applies only inconsistently across a long transcript.

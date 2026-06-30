@@ -23,7 +23,11 @@ export interface TeamMember {
 
 export interface AppSettings {
   transcribeModel: string; // e.g. "gpt-4o-transcribe-diarize"
-  postprocessModel: string; // e.g. "gpt-4o"
+  postprocessModel: string; // analysis pass (summary + action items), e.g. "gpt-4o"
+  // Cleaning pass (transcript tidy-up) model. The cleaning pass is mechanical and the bulk
+  // of post-processing token volume, so a cheaper model here cuts cost sharply. Empty falls
+  // back to postprocessModel. e.g. "gpt-4o-mini".
+  cleanModel: string;
   language: string; // ISO hint, e.g. "el"
   pollIntervalMinutes: number; // cron cadence
   cronEnabled: boolean;
@@ -47,6 +51,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Plain model is the reliable default; the diarize model currently times out on long files.
   transcribeModel: "gpt-4o-transcribe",
   postprocessModel: "gpt-4o",
+  // Cleaning is mechanical, so the cheaper model handles it; analysis stays on gpt-4o.
+  cleanModel: "gpt-4o-mini",
   language: "el",
   pollIntervalMinutes: 15,
   cronEnabled: false,

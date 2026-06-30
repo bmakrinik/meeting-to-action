@@ -8,6 +8,7 @@ interface TeamMember { name: string; role?: string }
 interface Settings {
   transcribeModel: string;
   postprocessModel: string;
+  cleanModel: string;
   language: string;
   pollIntervalMinutes: number;
   cronEnabled: boolean;
@@ -28,10 +29,14 @@ const MODEL_SUGGESTIONS = [
   "whisper-1",
 ];
 
+const POSTPROCESS_MODEL_SUGGESTIONS = ["gpt-4o", "gpt-4o-mini"];
+
 export default function SettingsPage() {
   const [s, setS] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
   const [customModel, setCustomModel] = useState(false);
+  const [customAnalysis, setCustomAnalysis] = useState(false);
+  const [customClean, setCustomClean] = useState(false);
 
   useEffect(() => {
     fetch("/api/settings", { cache: "no-store" })
@@ -109,11 +114,77 @@ export default function SettingsPage() {
             </div>
           </div>
           <div className="field">
-            <label>Post-processing model</label>
-            <input
-              value={s.postprocessModel}
-              onChange={(e) => up("postprocessModel", e.target.value)}
-            />
+            <label>Analysis model (summary + action items)</label>
+            <select
+              value={customAnalysis ? "__custom__" : s.postprocessModel}
+              onChange={(e) => {
+                if (e.target.value === "__custom__") {
+                  setCustomAnalysis(true);
+                } else {
+                  setCustomAnalysis(false);
+                  up("postprocessModel", e.target.value);
+                }
+              }}
+            >
+              {Array.from(
+                new Set([...POSTPROCESS_MODEL_SUGGESTIONS, s.postprocessModel])
+              )
+                .filter(Boolean)
+                .map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              <option value="__custom__">Custom…</option>
+            </select>
+            {customAnalysis && (
+              <input
+                style={{ marginTop: 8 }}
+                placeholder="enter a model id"
+                value={s.postprocessModel}
+                onChange={(e) => up("postprocessModel", e.target.value)}
+              />
+            )}
+            <div className="muted small">
+              The reasoning pass. Keep a strong model here (e.g. gpt-4o).
+            </div>
+          </div>
+          <div className="field">
+            <label>Cleaning model (transcript tidy-up)</label>
+            <select
+              value={customClean ? "__custom__" : s.cleanModel}
+              onChange={(e) => {
+                if (e.target.value === "__custom__") {
+                  setCustomClean(true);
+                } else {
+                  setCustomClean(false);
+                  up("cleanModel", e.target.value);
+                }
+              }}
+            >
+              <option value="">Same as analysis model</option>
+              {Array.from(new Set([...POSTPROCESS_MODEL_SUGGESTIONS, s.cleanModel]))
+                .filter(Boolean)
+                .map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              <option value="__custom__">Custom…</option>
+            </select>
+            {customClean && (
+              <input
+                style={{ marginTop: 8 }}
+                placeholder="enter a model id"
+                value={s.cleanModel}
+                onChange={(e) => up("cleanModel", e.target.value)}
+              />
+            )}
+            <div className="muted small">
+              Mechanical pass and the bulk of post-processing cost. A cheaper model (e.g.
+              gpt-4o-mini) cuts cost sharply. "Same as analysis model" reuses the analysis
+              model for cleaning too.
+            </div>
           </div>
         </div>
         <div className="grid2">
