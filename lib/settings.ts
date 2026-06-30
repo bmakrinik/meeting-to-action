@@ -24,12 +24,13 @@ export interface TeamMember {
 export interface AppSettings {
   transcribeModel: string; // e.g. "gpt-4o-transcribe-diarize"
   postprocessModel: string; // e.g. "gpt-4o"
-  language: string; // optional ISO hint, e.g. "en"; blank = auto-detect
+  language: string; // ISO hint, e.g. "el"
   pollIntervalMinutes: number; // cron cadence
   cronEnabled: boolean;
   enrolledSpeakers: EnrolledSpeaker[]; // <= 4 meaningful for diarize enrollment
   glossary: GlossaryEntry[];
   teamRoster: TeamMember[]; // company members, for resolving action-item owners by name
+  vocabulary: string[]; // correct domain terms / proper nouns; the LLM snaps mangled mentions to these
   notionDatabaseId: string; // overrides env if set
   meetRecordingsFolderId: string; // legacy single folder (kept for back-compat with stored settings)
   meetRecordingsFolderIds: string[]; // Shared Drive folders to poll
@@ -46,12 +47,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Plain model is the reliable default; the diarize model currently times out on long files.
   transcribeModel: "gpt-4o-transcribe",
   postprocessModel: "gpt-4o",
-  language: "",
+  language: "el",
   pollIntervalMinutes: 15,
   cronEnabled: false,
   enrolledSpeakers: [],
   glossary: [],
   teamRoster: [],
+  vocabulary: [],
   notionDatabaseId: process.env.NOTION_DATABASE_ID || "",
   meetRecordingsFolderId: "",
   meetRecordingsFolderIds: process.env.MEET_RECORDINGS_FOLDER_ID

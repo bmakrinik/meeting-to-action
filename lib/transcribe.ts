@@ -44,6 +44,9 @@ export async function run(
     } else {
       // Plain transcription models return a single `text` field.
       req.response_format = "json";
+      // Bias the model toward connected speech to cut wrong-language hallucinations
+      // during silence. Not supported by the diarize model, which rejects a prompt.
+      req.prompt = "This is a business meeting.";
     }
     const resp: any = await client().audio.transcriptions.create(req);
     raw.push(resp);

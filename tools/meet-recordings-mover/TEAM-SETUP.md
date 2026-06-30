@@ -2,10 +2,15 @@
 
 We automatically transcribe meetings and write summaries + action items to Notion. For
 your meetings to be included, do this **one-time, 3-minute** setup. It installs a tiny
-script in your Google account that moves your new Meet recordings into our shared folder.
+script in your Google account that moves your new Meet recordings into our shared folder
+and tags each one with the meeting's attendees (from your calendar).
 
 It only ever touches **your own** recordings, and only **new** ones (your past recordings
-are left alone). It never reads your documents or anyone else's Drive.
+are left alone). It never reads your documents.
+
+> **Already set this up before?** Please redo steps 2-7 with the scripts below, they now
+> also read the meeting's calendar event (organizer + guests), so re-running asks for one
+> new Calendar permission. Approve it.
 
 ---
 
@@ -13,21 +18,16 @@ are left alone). It never reads your documents or anyone else's Drive.
 
 1. Go to **https://script.google.com** and click **New project**.
 2. Delete whatever is in the `Code.gs` file and paste in **Script 1** below.
-3. Click the **gear icon (Project Settings)** in the left sidebar, and tick
-   **"Show 'appsscript.json' manifest file in the editor."**
-4. Click the **`< >` (Editor)** icon to go back. Open the new **`appsscript.json`** file,
-   delete its contents, and paste in **Script 2** below.
+3. Click the **gear icon (Project Settings)** and tick **"Show 'appsscript.json' manifest file in the editor."**
+4. Click the **`< >` (Editor)** icon, open **`appsscript.json`**, delete its contents, and paste in **Script 2**.
 5. Press **Cmd/Ctrl + S** to save both files.
-6. In the toolbar, choose **`setup`** in the function dropdown (next to Run), then click
-   **Run**.
-7. Approve the permission prompt:
+6. Choose **`setup`** in the function dropdown (next to Run), then click **Run**.
+7. Approve the permission prompt (Drive + Calendar):
    - Choose your account.
-   - On "Google hasn't verified this app": click **Advanced** → **Go to (project) (unsafe)**
-     → **Allow**. (It's your own script, this is expected.)
-8. Check the **Execution log** at the bottom shows `Trigger created...` and `Done.`
+   - On "Google hasn't verified this app": **Advanced** → **Go to (project) (unsafe)** → **Allow**.
+8. Check the **Execution log** shows `Trigger created...` and `Done.`
 
-That's it. From now on your new recordings move automatically every 15 minutes and get
-transcribed. You can close the tab.
+That's it. New recordings move automatically every 15 minutes and get transcribed.
 
 > Prerequisite: you need access to the shared recordings drive. If step 6 logs a `403` /
 > permission error, ask the product team to add you, then re-run `setup`.
@@ -42,6 +42,7 @@ const SOURCE_FOLDER_NAME = 'Meet Recordings';
 const MIN_AGE_MINUTES = 10;
 const TRIGGER_EVERY_MINUTES = 15;
 const START_PROP = 'moveFilesCreatedAfter';
+const CALENDAR_LOOKBACK_HOURS = 8;
 
 function moveNewRecordings() {
   const startAfter = Number(
@@ -64,9 +65,10 @@ function moveNewRecordings() {
     const f = files.next();
     if (f.getMimeType() !== 'video/mp4') continue;
     const created = f.getDateCreated().getTime();
-    if (created > cutoff) { skippedRecent++; continue; }   // too new, may still be writing
-    if (created < startAfter) { skippedOld++; continue; }   // pre-install backlog: leave it
+    if (created > cutoff) { skippedRecent++; continue; }
+    if (created < startAfter) { skippedOld++; continue; }
     try {
+      stampCalendarMeta_(f);
       f.moveTo(dest);
       moved++;
       Logger.log('Moved: ' + f.getName());
@@ -76,10 +78,58 @@ function moveNewRecordings() {
     }
   }
 
-  Logger.log(
-    'Done. moved=%s skippedRecent=%s skippedOld=%s failed=%s',
-    moved, skippedRecent, skippedOld, failed
-  );
+  Logger.log('Done. moved=%s skippedRecent=%s skippedOld=%s failed=%s',
+    moved, skippedRecent, skippedOld, failed);
+}
+
+// Tag the recording with its calendar event's organizer + guests (best-effort).
+function stampCalendarMeta_(f) {
+  try {
+    const created = f.getDateCreated();
+    const start = new Date(created.getTime() - CALENDAR_LOOKBACK_HOURS * 60 * 60 * 1000);
+    const want = normalizeTitle_(cleanTitle_(f.getName()));
+    if (!want) return;
+
+    const events = CalendarApp.getEvents(start, created);
+    let best = null;
+    for (let i = 0; i < events.length; i++) {
+      const nt = normalizeTitle_(events[i].getTitle() || '');
+      if (!nt) continue;
+      if (nt === want || nt.indexOf(want) >= 0 || want.indexOf(nt) >= 0) {
+        if (!best || events[i].getStartTime() > best.getStartTime()) best = events[i];
+      }
+    }
+    if (!best) return;
+
+    const guests = best.getGuestList(true);
+    const invited = [], attendees = [];
+    for (let j = 0; j < guests.length; j++) {
+      const g = guests[j];
+      invited.push(g.getEmail());
+      const s = g.getGuestStatus();
+      if (s === CalendarApp.GuestStatus.YES || s === CalendarApp.GuestStatus.OWNER) {
+        attendees.push(g.getEmail());
+      }
+    }
+    const organizer = (best.getCreators() && best.getCreators()[0]) || null;
+    f.setDescription(JSON.stringify({ organizer: organizer, invited: invited, attendees: attendees }));
+    Logger.log('Tagged "%s" from event "%s" (%s invited, %s accepted)',
+      f.getName(), best.getTitle(), invited.length, attendees.length);
+  } catch (e) {
+    Logger.log('Calendar lookup failed for "%s": %s', f.getName(), e);
+  }
+}
+
+function cleanTitle_(name) {
+  return name
+    .replace(/\.mp4$/i, '')
+    .replace(/\s*-\s*recording\s*$/i, '')
+    .replace(/\s*[-–]\s*\d{4}[\/_.-]\d{2}[\/_.-]\d{2}[ T_]+\d{2}[:_.]\d{2}(?::\d{2})?(?:\s*[A-Za-z]{2,5})?\s*$/, '')
+    .trim();
+}
+
+function normalizeTitle_(t) {
+  return (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 function setup() {
@@ -108,7 +158,8 @@ function setup() {
   "runtimeVersion": "V8",
   "oauthScopes": [
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/script.scriptapp"
+    "https://www.googleapis.com/auth/script.scriptapp",
+    "https://www.googleapis.com/auth/calendar.readonly"
   ]
 }
 ```
@@ -117,11 +168,12 @@ function setup() {
 
 ## Good to know
 
-- **Only new recordings are moved.** Your existing recording history stays where it is
-  (the log shows `skippedOld=N`).
+- **Only new recordings are moved.** Your existing recording history stays where it is.
+- It reads the **matching calendar event** to fill in the meeting's host and attendees in
+  Notion. Calendar access is read-only, and the script only reads your own calendar. Meetings
+  with no calendar event (ad-hoc Meets) still work; they just won't have a guest list.
 - A recording **leaves your "Meet Recordings" folder** once moved (it now lives in the
   shared drive). Want to keep a personal copy? Tell the product team.
-- The script only touches video files in your Meet Recordings folder, never your docs.
 - **Privacy:** meetings get transcribed into a shared Notion database others can read. Make
   sure participants know a meeting is recorded and captured. If a meeting shouldn't be
   transcribed, don't record it.

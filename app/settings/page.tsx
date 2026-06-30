@@ -14,6 +14,7 @@ interface Settings {
   enrolledSpeakers: Speaker[];
   glossary: Glossary[];
   teamRoster: TeamMember[];
+  vocabulary: string[];
   notionDatabaseId: string;
   meetRecordingsFolderId: string;
   meetRecordingsFolderIds: string[];
@@ -279,7 +280,13 @@ export default function SettingsPage() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginTop: 0 }}>Glossary (fix mis-transcribed terms)</h3>
+        <h3 style={{ marginTop: 0 }}>Exact replacements</h3>
+        <div className="muted small" style={{ marginBottom: 10 }}>
+          Force a specific text to always be replaced (applied verbatim, case-insensitive).
+          Use this for stubborn mis-transcriptions the model keeps getting wrong, e.g. a name
+          heard as a real word ("βασίλισσα" → "Βασίλης"). For normal corrections, prefer
+          Known terms above.
+        </div>
         {s.glossary.map((g, i) => (
           <div className="repeatable-row" key={i}>
             <input
@@ -292,7 +299,7 @@ export default function SettingsPage() {
               }}
             />
             <input
-              placeholder="Correct term"
+              placeholder="Replace with"
               value={g.right}
               onChange={(e) => {
                 const next = [...s.glossary];
@@ -312,7 +319,7 @@ export default function SettingsPage() {
           className="secondary"
           onClick={() => up("glossary", [...s.glossary, { wrong: "", right: "" }])}
         >
-          + Add term
+          + Add replacement
         </button>
       </div>
 
@@ -356,6 +363,21 @@ export default function SettingsPage() {
         >
           + Add member
         </button>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Known terms / vocabulary</h3>
+        <div className="muted small" style={{ marginBottom: 10 }}>
+          Correct spellings of product names, jargon, and proper nouns the transcriber tends
+          to mangle (one per line). The model maps garbled mentions to these automatically,
+          you don't need to list the wrong spellings. e.g. product names, project codenames, acronyms.
+        </div>
+        <textarea
+          rows={6}
+          value={s.vocabulary.join("\n")}
+          onChange={(e) => up("vocabulary", e.target.value.split("\n"))}
+          placeholder={"Acme\nKubernetes\nQuarterly OKRs"}
+        />
       </div>
 
       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>

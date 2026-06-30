@@ -27,6 +27,8 @@ access to anyone else's Drive, each person's script only ever touches their own 
 ## Part 2: Per-recorder setup (each person, ~3 minutes, once)
 
 Anyone who records meetings does this once. New hires do it during onboarding.
+**Already set this up before?** Redo it with the current files, the script now also reads
+the meeting's calendar event, so re-running asks for one new Calendar permission.
 
 1. Go to https://script.google.com → **New project**.
 2. Replace the default `Code.gs` with this folder's `Code.gs`. (The target folder is
@@ -34,8 +36,8 @@ Anyone who records meetings does this once. New hires do it during onboarding.
 3. Open **Project Settings** (gear icon) → tick **"Show appsscript.json manifest file"**,
    then replace `appsscript.json` with this folder's version.
 4. Save both files. Select **`setup`** in the function dropdown → **Run**.
-   - Approve the Google permission prompt (Drive access, so it can move your recordings).
-     On the "unverified app" screen: Advanced → Go to project → Allow.
+   - Approve the Google permission prompt (**Drive + Calendar**, to move recordings and read
+     the matching event). On the "unverified app" screen: Advanced → Go to project → Allow.
 5. Check the **Execution log** shows `Trigger created...` then `Done.`
 
 That's it, new recordings move automatically every 15 minutes.
@@ -50,6 +52,10 @@ That's it, new recordings move automatically every 15 minutes.
   script to copy instead of move.
 - The script only touches `video/mp4` files in your Meet Recordings folder, never your docs
   or anything else.
+- It reads the **matching calendar event** (your own calendar, read-only) and tags the
+  recording with the organizer and guests, so Notion gets the meeting's **Host / Invited /
+  Attendees**. Ad-hoc Meets with no calendar event still work; they just won't have a guest
+  list (the app falls back to names mentioned in the meeting).
 - After processing, the app keeps a small **audio** copy in the Shared Drive and (by
   default) trashes the **video after 30 days**. Adjustable in the app's Settings.
 

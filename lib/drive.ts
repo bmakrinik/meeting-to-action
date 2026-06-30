@@ -12,6 +12,32 @@ export interface MeetingFile {
   localPath?: string; // populated for fixtures
   createdTime?: string; // ISO; when the recording was created (~ meeting time)
   folderId?: string; // the Drive folder it was found in (for audio retain-upload)
+  calendar?: CalendarMeta; // organizer/guests, stamped on the file's description by the mover script
+}
+
+// Calendar info the per-user mover script writes into the recording's Drive description
+// (as JSON), so the app gets authoritative attendees/host without calendar access of its own.
+export interface CalendarMeta {
+  organizer: string | null;
+  invited: string[];
+  attendees: string[];
+}
+
+function parseCalendarMeta(description?: string | null): CalendarMeta | undefined {
+  if (!description) return undefined;
+  try {
+    const m = JSON.parse(description);
+    if (m && (m.organizer || m.invited || m.attendees)) {
+      return {
+        organizer: m.organizer ?? null,
+        invited: Array.isArray(m.invited) ? m.invited.map(String) : [],
+        attendees: Array.isArray(m.attendees) ? m.attendees.map(String) : [],
+      };
+    }
+  } catch {
+    /* description wasn't our JSON; ignore */
+  }
+  return undefined;
 }
 
 const WORK_DIR = process.env.WORK_DIR || path.join(process.cwd(), "data", "work");
@@ -103,7 +129,7 @@ async function listDriveFiles(): Promise<MeetingFile[]> {
     do {
       const res = await drive.files.list({
         q: `'${folderId}' in parents and mimeType = 'video/mp4' and trashed = false`,
-        fields: "nextPageToken, files(id, name, createdTime)",
+        fields: "nextPageToken, files(id, name, createdTime, description)",
         orderBy: "createdTime",
         pageSize: 100,
         // Required so a folder living in a Shared Drive is traversed.
@@ -118,6 +144,7 @@ async function listDriveFiles(): Promise<MeetingFile[]> {
           source: "drive" as const,
           createdTime: f.createdTime || undefined,
           folderId,
+          calendar: parseCalendarMeta(f.description),
         });
       pageToken = res.data.nextPageToken || undefined;
     } while (pageToken);

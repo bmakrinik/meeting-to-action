@@ -38,6 +38,53 @@ function glossaryText(settings: AppSettings): string {
   );
 }
 
+// Correct domain terms / proper nouns the transcriber tends to mangle: the configured
+// vocabulary plus the team roster names. The LLM uses these to fix garbled mentions
+// dynamically (no need to enumerate every wrong spelling).
+function knownTermsText(settings: AppSettings): string {
+  const terms = [
+    ...settings.vocabulary,
+    ...settings.teamRoster.map((m) => m.name),
+  ]
+    .map((t) => (t || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(terms)).join(", ") || "(none provided)";
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Deterministic exact replacements from the glossary, applied verbatim (the LLM pass is
+// inconsistent at catching every instance, this guarantees them).
+function applyGlossary(text: string, settings: AppSettings): string {
+  let t = text;
+  for (const g of settings.glossary) {
+    if (!g.wrong || !g.right) continue;
+    t = t.replace(new RegExp(escapeRe(g.wrong), "gi"), g.right);
+  }
+  return t;
+}
+
+// Deterministic filler removal for the high-frequency verbal tics the LLM tends to leave behind.
+function stripFillers(text: string): string {
+  let t = text;
+  // comma-bounded discourse markers -> collapse to a single comma
+  t = t.replace(/,\s*(you know|i mean|sort of|kind of)\s*,/gi, ", ");
+  // sentence-leading marker + comma -> drop
+  t = t.replace(/(^|[.!?;]\s+)(you know|i mean|well)\s*,\s*/gi, "$1");
+  // filler interjections
+  t = t.replace(/\s*(?<!\p{L})(um+|uh+|erm+|hmm+)(?!\p{L})/giu, "");
+  // tidy whitespace + punctuation
+  t = t
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;!?])/g, "$1")
+    .replace(/,\s*,/g, ",")
+    .replace(/(^|\n)[ ,]+/g, "$1")
+    .replace(/[ \t]+\n/g, "\n");
+  return t;
+}
+
 function splitForCleaning(text: string): string[] {
   const parts: string[] = [];
   let i = 0;
@@ -54,12 +101,30 @@ function splitForCleaning(text: string): string[] {
   return parts.length ? parts : [""];
 }
 
-const CLEAN_SYSTEM = `You clean raw speech-to-text transcripts of meetings.
+const CLEAN_SYSTEM = `You clean raw speech-to-text transcripts of meetings. A transcript may be in any language or mix languages.
 Rules:
-- Preserve ALL meaning and content. Do NOT summarize, drop, or add information.
+- Preserve ALL real meaning and content. Do NOT summarize, drop, or add real information.
 - Fix punctuation and capitalization, and split the text into readable paragraphs.
-- Remove only meaningless filler and false starts (repeated restarts of the same sentence) when they add nothing.
-- Keep the original language(s); do not translate, and leave technical terms as spoken.
+- Remove filler words and verbal tics. Delete discourse markers like "um", "uh", "you know",
+  "like", "I mean", "sort of" (and their equivalents in other languages) wherever they add
+  nothing, and drop repeated restarts of the same phrase. Removing a filler must never change
+  the meaning of the surrounding sentence (re-join the remaining words cleanly).
+- Drop speech-to-text HALLUCINATIONS: segments the model invented that are not real speech.
+  Remove obvious mic-check / setup chatter and nonsensical off-topic lines at the very start
+  or end (silence often produces fabricated text like "testing, testing"). Only remove text
+  you are confident is a fabrication; never remove real discussion, and never translate, just
+  delete the artifact.
+- Keep each part of the transcript in its original language; do not translate.
+- Fix garbled speech-to-text tokens, including non-words. You only have the text, so when a
+  token is not a real word, SOUND IT OUT phonetically and infer the intended word from how it
+  sounds plus the surrounding context. A token transcribed in one script may be a phonetic
+  mis-hearing of a word (often an English/technical term) in another, so consider that and
+  restore the word in its correct language and spelling. LEAN TOWARD FIXING clear gibberish to
+  the most likely intended word, but do NOT paraphrase or "improve" words that are already
+  valid, and never invent content that wasn't said.
+- KNOWN TERMS AND NAMES (correct spellings): {KNOWN_TERMS}.
+  Match tokens against this list phonetically and replace a clear phonetic mangling of a known
+  product/person with the correct spelling above. Do not force unrelated words onto this list.
 - If a line is prefixed with "Speaker N:" or a person's name, keep that label.
 - Apply this glossary of corrections where the term appears:
 {GLOSSARY}
@@ -68,13 +133,18 @@ Return ONLY the cleaned transcript text, with no preamble or commentary.`;
 async function cleanChunk(
   chunk: string,
   glossary: string,
+  knownTerms: string,
   model: string
 ): Promise<string> {
+  const system = CLEAN_SYSTEM.replace("{GLOSSARY}", glossary).replace(
+    "{KNOWN_TERMS}",
+    knownTerms
+  );
   const resp = await client().chat.completions.create({
     model,
     temperature: 0.2,
     messages: [
-      { role: "system", content: CLEAN_SYSTEM.replace("{GLOSSARY}", glossary) },
+      { role: "system", content: system },
       { role: "user", content: chunk },
     ],
   });
@@ -92,6 +162,9 @@ GROUNDING RULES (critical):
   only when the transcript supports it (the person volunteers, is assigned, or is addressed by name);
   otherwise owner = null. Never guess an owner.
 - Keep every quote in its original language; do not translate.
+- Use the KNOWN TERMS AND NAMES list to recognize garbled transcriptions: a phonetic
+  mangling of a known product name or person should be understood as that term/person
+  (e.g. when matching an owner or naming a topic). Do not invent matches.
 
 summary: an OBJECT with three arrays of short strings that describe WHAT HAPPENED
 (never things to be done):
@@ -173,6 +246,7 @@ async function analyze(
   glossary: string,
   speakers: string,
   roster: string,
+  knownTerms: string,
   model: string
 ): Promise<{
   summary: string;
@@ -182,6 +256,7 @@ async function analyze(
   unmappedSpeakers: string[];
 }> {
   const user =
+    `KNOWN TERMS AND NAMES (correct spellings; map garbled mentions to these):\n${knownTerms}\n\n` +
     `GLOSSARY (wrong -> right):\n${glossary}\n\n` +
     `TEAM ROSTER (resolve owners to these people when supported):\n${roster || "(none provided)"}\n\n` +
     `ENROLLED SPEAKERS (likely in this meeting):\n${speakers || "(none provided)"}\n\n` +
@@ -230,6 +305,7 @@ export async function run(
   settings: AppSettings
 ): Promise<PostProcessResult> {
   const glossary = glossaryText(settings);
+  const knownTerms = knownTermsText(settings);
   const speakers = settings.enrolledSpeakers
     .map((s) => `- ${s.name}${s.hint ? ` (${s.hint})` : ""}`)
     .join("\n");
@@ -238,19 +314,29 @@ export async function run(
     .join("\n");
 
   // Analysis runs on the full raw transcript (small JSON output, no truncation risk).
-  const analysis = await analyze(transcript, glossary, speakers, roster, settings.postprocessModel);
+  const analysis = await analyze(
+    transcript,
+    glossary,
+    speakers,
+    roster,
+    knownTerms,
+    settings.postprocessModel
+  );
 
   // Cleaning runs chunk-by-chunk and is concatenated, so length is unbounded.
   const chunks = splitForCleaning(transcript);
   const cleanedParts: string[] = [];
   for (const c of chunks) {
-    cleanedParts.push(await cleanChunk(c, glossary, settings.postprocessModel));
+    cleanedParts.push(await cleanChunk(c, glossary, knownTerms, settings.postprocessModel));
   }
+  // Deterministic post-pass: guarantee exact glossary replacements and filler removal that
+  // the LLM applies only inconsistently across a long transcript.
+  const cleanedTranscript = stripFillers(applyGlossary(cleanedParts.join("\n\n"), settings));
 
   return {
     summary: analysis.summary,
     rawTranscript: transcript,
-    cleanedTranscript: cleanedParts.join("\n\n"),
+    cleanedTranscript,
     actionItems: analysis.actionItems,
     attendees: analysis.attendees,
     host: analysis.host,

@@ -52,6 +52,7 @@ export interface WriteInput {
   title: string;
   meetingTime?: string | null; // ISO; populates the Date property and a metadata line
   attendees?: string[];
+  invited?: string[];
   host?: string | null;
   summary: string;
   actionItems: ActionItem[];
@@ -64,8 +65,7 @@ export interface WriteResult {
   url: string;
 }
 
-// Defaults for fixed-value select properties (only applied if the property and option
-// both exist in your database). Set WORKSPACE to your own value if you use that column.
+// Defaults for fixed-value select properties (only applied if the option exists).
 const PLATFORM = "Google Meet";
 const WORKSPACE = ""; // e.g. your workspace/team name; left blank by default
 const STATUS = "Summarized";
@@ -117,10 +117,19 @@ function buildProperties(schema: Record<string, any>, input: WriteInput): any {
       };
   }
 
-  // Host -> multi_select (single inferred organizer).
+  // Host -> multi_select (single organizer).
   if (input.host) {
     const hostName = byType("multi_select", ["Host"]);
     if (hostName) props[hostName] = { multi_select: [{ name: input.host.slice(0, 100) }] };
+  }
+
+  // Invited -> multi_select (calendar guest list, when available).
+  if (input.invited?.length) {
+    const invName = byType("multi_select", ["Invited"]);
+    if (invName)
+      props[invName] = {
+        multi_select: input.invited.slice(0, 100).map((a) => ({ name: a.slice(0, 100) })),
+      };
   }
 
   // Summary -> a rich_text property.

@@ -95,6 +95,15 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
     const t = await transcribe.run(audioChunks, settings);
     const pp = await postprocess.run(t.text, settings);
 
+    // Prefer authoritative calendar data (stamped on the file by the mover script) over
+    // the LLM's inference. Attendees = actual/accepted guests if known, else invited, else
+    // the inferred list. Host = the event organizer if known, else the inferred host.
+    const cal = file.calendar;
+    const attendees =
+      cal?.attendees?.length ? cal.attendees : cal?.invited?.length ? cal.invited : pp.attendees;
+    const host = cal?.organizer || pp.host;
+    const invited = cal?.invited || [];
+
     // Persist transcription + extraction results immediately, BEFORE the Notion write,
     // so they survive on the dashboard even if routing is skipped or fails.
     db()
@@ -108,7 +117,7 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
         pp.summary,
         JSON.stringify(pp.unmappedSpeakers),
         meetingTime,
-        JSON.stringify(pp.attendees),
+        JSON.stringify(attendees),
         runId
       );
 
@@ -125,17 +134,25 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
     const notionConfigured = !!(process.env.NOTION_TOKEN && dbId);
 
     if (notionConfigured) {
-      // Clean meeting title: drop the .mp4 extension and a trailing " - Recording".
-      const title = file.name
+      // Clean meeting title: drop ".mp4", a trailing " - Recording", and the trailing
+      // date/time/timezone (Meet appends it; it's already captured in Date & Time).
+      // "Google Ads - SEO - 2026/06/29 14:00 EEST - Recording.mp4" -> "Google Ads - SEO"
+      let title = file.name
         .replace(/\.mp4$/i, "")
-        .replace(/\s*-\s*Recording\s*$/i, "")
+        .replace(/\s*-\s*recording\s*$/i, "")
+        .replace(
+          /\s*[-–]\s*\d{4}[/_.-]\d{2}[/_.-]\d{2}[ T_]+\d{2}[:_.]\d{2}(?:[:_.]\d{2})?(?:\s*[A-Za-z]{2,5})?\s*$/,
+          ""
+        )
         .trim();
+      if (!title) title = (meetingTime || startedAt).slice(0, 10); // fallback if name was only a date
       const page = await notion.write({
         databaseId: dbId!,
         title,
         meetingTime,
-        attendees: pp.attendees,
-        host: pp.host,
+        attendees,
+        host,
+        invited,
         summary: pp.summary,
         actionItems: pp.actionItems,
         transcript: pp.cleanedTranscript,
