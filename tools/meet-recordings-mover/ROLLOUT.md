@@ -31,8 +31,8 @@ Anyone who records meetings does this once. New hires do it during onboarding.
 the meeting's calendar event, so re-running asks for one new Calendar permission.
 
 1. Go to https://script.google.com → **New project**.
-2. Replace the default `Code.gs` with this folder's `Code.gs`. (The target folder is
-   already filled in, nothing to edit.)
+2. Replace the default `Code.gs` with this folder's `Code.gs`, then set
+   `SHARED_DRIVE_FOLDER_ID` at the top to the recordings folder id from Part 1.
 3. Open **Project Settings** (gear icon) → tick **"Show appsscript.json manifest file"**,
    then replace `appsscript.json` with this folder's version.
 4. Save both files. Select **`setup`** in the function dropdown → **Run**.

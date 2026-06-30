@@ -17,11 +17,12 @@ is no Cloud project or API to enable.
 ## Setup (per recorder, ~3 minutes)
 
 Prerequisite (admin, once): a Shared Drive with a recordings folder, the service account
-added as **Content manager**, and each recorder added as **Contributor**. The folder id is
-already preset in `Code.gs` (`SHARED_DRIVE_FOLDER_ID`).
+added as **Content manager**, and each recorder added as **Contributor**. Have the
+recordings folder's id ready (the last path segment of the folder's Drive URL).
 
 1. https://script.google.com → **New project**.
-2. Replace `Code.gs` with this folder's `Code.gs`.
+2. Replace `Code.gs` with this folder's `Code.gs`, then set `SHARED_DRIVE_FOLDER_ID` at the
+   top to your recordings folder id.
 3. Project Settings → tick **"Show appsscript.json manifest file"** → replace
    `appsscript.json` with this folder's version.
 4. Save both. Select `setup` → **Run** → approve the Drive prompt.
