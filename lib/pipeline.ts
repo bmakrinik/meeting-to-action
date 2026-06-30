@@ -195,15 +195,22 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
       // Retain a small audio copy in the Shared Drive so the video can be removed later
       // (immediately if configured, otherwise by the retention sweep after N days).
       // Best-effort: failure here must not fail an already-published run.
+      // Track whether an audio copy is confirmed present, so the immediate-delete path
+      // below can apply the same "never delete a video without its audio" guard the
+      // retention sweep enforces.
+      let audioRetained = false;
       if (file.source === "drive") {
         const recFolder = file.folderId || recordingsFolderIds()[0];
         if (recFolder) {
           try {
             const audioName = `${file.name.replace(/\.mp4$/i, "")}.m4a`;
-            if (!(await drive.fileExistsInFolder(recFolder, audioName))) {
+            if (await drive.fileExistsInFolder(recFolder, audioName)) {
+              audioRetained = true;
+            } else {
               const full = await audio.extractFull(mp4Path, file.id);
               await drive.uploadAudio(recFolder, audioName, full);
               audio.cleanup([full]);
+              audioRetained = true;
             }
           } catch (e: any) {
             console.warn(
@@ -216,14 +223,24 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
       // Optionally trash the source MP4 immediately. Off by default; requires the Drive
       // service account to have Editor access. Best-effort: a cleanup failure must NOT
       // fail an already-published run. (Retention sweep handles deferred deletion.)
+      // Only delete once an audio copy is confirmed present, so a video is never removed
+      // without its archival audio (e.g. if the retention upload above failed).
       if (settings.deleteRecordingAfterProcessing) {
-        try {
-          await drive.trash(file);
-        } catch (e: any) {
+        if (!audioRetained) {
           console.warn(
-            `[pipeline] transcribed & published, but could not trash "${file.name}" ` +
-              `(grant the Drive service account Editor access): ${e?.message || e}`
+            `[pipeline] transcribed & published, but keeping "${file.name}": no audio ` +
+              `copy was retained, so the video is not deleted. The retention sweep will ` +
+              `retry once an audio copy exists.`
           );
+        } else {
+          try {
+            await drive.trash(file);
+          } catch (e: any) {
+            console.warn(
+              `[pipeline] transcribed & published, but could not trash "${file.name}" ` +
+                `(grant the Drive service account Editor access): ${e?.message || e}`
+            );
+          }
         }
       }
 
