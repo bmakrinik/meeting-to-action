@@ -6,6 +6,7 @@ import * as transcribe from "./transcribe";
 import * as postprocess from "./postprocess";
 import * as notion from "./notion";
 import type { MeetingFile } from "./drive";
+import type { CostBreakdown } from "./pricing";
 
 export interface RunSummary {
   fileId: string;
@@ -92,8 +93,26 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
     const extracted = await audio.extract(mp4Path, file.id, isDiarize ? 300 : 1200);
     audioChunks = extracted.chunks;
 
-    const t = await transcribe.run(audioChunks, settings);
+    const t = await transcribe.run(audioChunks, settings, extracted.durationSeconds);
     const pp = await postprocess.run(t.text, settings);
+
+    // Real per-stage token + USD cost for this meeting (transcription / cleaning / analysis).
+    const cleanModel = settings.cleanModel || settings.postprocessModel;
+    const cost: CostBreakdown = {
+      audioSeconds: extracted.durationSeconds,
+      transcription: t.usage,
+      cleaning: pp.usage.cleaning,
+      analysis: pp.usage.analysis,
+      totalUsd: t.usage.costUsd + pp.usage.cleaning.costUsd + pp.usage.analysis.costUsd,
+    };
+    console.log(
+      `[pipeline] cost "${file.name}" | meeting ${meetingTime ?? "?"} | ` +
+        `${(cost.audioSeconds / 60).toFixed(1)} min audio | ` +
+        `transcription ${cost.transcription.model} $${cost.transcription.costUsd.toFixed(4)} (${cost.transcription.calls} calls) | ` +
+        `cleaning ${cost.cleaning.model} $${cost.cleaning.costUsd.toFixed(4)} (${cost.cleaning.totalTokens ?? 0} tok) | ` +
+        `analysis ${cost.analysis.model} $${cost.analysis.costUsd.toFixed(4)} (${cost.analysis.totalTokens ?? 0} tok) | ` +
+        `total $${cost.totalUsd.toFixed(4)}`
+    );
 
     // Prefer authoritative calendar data (stamped on the file by the mover script) over
     // the LLM's inference. Attendees = actual/accepted guests if known, else invited, else
@@ -109,7 +128,8 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
     db()
       .prepare(
         `UPDATE runs SET transcript=?, raw_transcript=?, summary=?, unmapped_speakers=?,
-           meeting_time=?, attendees=? WHERE id=?`
+           meeting_time=?, attendees=?, clean_model=?, audio_seconds=?, total_cost_usd=?,
+           cost_json=? WHERE id=?`
       )
       .run(
         pp.cleanedTranscript,
@@ -118,6 +138,10 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
         JSON.stringify(pp.unmappedSpeakers),
         meetingTime,
         JSON.stringify(attendees),
+        cleanModel,
+        cost.audioSeconds,
+        cost.totalUsd,
+        JSON.stringify(cost),
         runId
       );
 

@@ -81,6 +81,14 @@ function migrate(d: Database.Database) {
   ensureColumn(d, "runs", "attendees", "TEXT"); // JSON array of participant names
   ensureColumn(d, "runs", "meeting_key", "TEXT"); // dedup key derived from the recording name
   d.exec(`CREATE INDEX IF NOT EXISTS idx_runs_key ON runs(meeting_key);`);
+
+  // Cost/usage tracking (added later). transcribe_model + postprocess_model already exist;
+  // clean_model is the third stage's model. total_cost_usd + audio_seconds are flat for quick
+  // display/sorting; cost_json holds the full per-stage breakdown (tokens + USD per stage).
+  ensureColumn(d, "runs", "clean_model", "TEXT");
+  ensureColumn(d, "runs", "audio_seconds", "REAL");
+  ensureColumn(d, "runs", "total_cost_usd", "REAL");
+  ensureColumn(d, "runs", "cost_json", "TEXT");
 }
 
 // Add a column if it does not already exist (SQLite has no ADD COLUMN IF NOT EXISTS).

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import OpenAI from "openai";
 import type { AppSettings } from "./settings";
+import { transcriptionCostUsd, hasAudioRate, type StageCost } from "./pricing";
 
 let _client: OpenAI | null = null;
 function client(): OpenAI {
@@ -17,16 +18,24 @@ function client(): OpenAI {
 export interface TranscriptResult {
   text: string; // full transcript, "Speaker N: ..." lines when diarization is available
   rawSegments: unknown; // provider response kept for debugging
+  usage: StageCost; // transcription cost/usage (billed per audio minute)
 }
 
 // Transcribe one or more audio chunks and concatenate. The model id comes from settings
 // so it can be swapped in the UI (e.g. gpt-4o-transcribe-diarize <-> gpt-4o-transcribe).
+// audioSeconds is the total meeting duration (from audio.extract) and is the basis for
+// transcription cost, which OpenAI bills per minute of audio rather than per token.
 export async function run(
   chunks: string[],
-  settings: AppSettings
+  settings: AppSettings,
+  audioSeconds = 0
 ): Promise<TranscriptResult> {
   const parts: string[] = [];
   const raw: unknown[] = [];
+  // Token usage is captured opportunistically: gpt-4o-transcribe may return a usage object,
+  // but the json/diarized_json responses often omit it, so it is telemetry only, not billing.
+  let inputTokens = 0;
+  let outputTokens = 0;
 
   const isDiarize = /diarize/i.test(settings.transcribeModel);
 
@@ -51,9 +60,28 @@ export async function run(
     const resp: any = await client().audio.transcriptions.create(req);
     raw.push(resp);
     parts.push(formatResponse(resp));
+    // gpt-4o-transcribe may include a usage object ({input_tokens, output_tokens}); sum it
+    // when present. Not all models/response formats return it, hence the guards.
+    const u = resp?.usage;
+    if (u) {
+      inputTokens += u.input_tokens ?? 0;
+      outputTokens += u.output_tokens ?? 0;
+    }
   }
 
-  return { text: parts.join("\n").trim(), rawSegments: raw };
+  const usage: StageCost = {
+    stage: "transcription",
+    model: settings.transcribeModel,
+    calls: chunks.length,
+    audioSeconds,
+    promptTokens: inputTokens || undefined,
+    completionTokens: outputTokens || undefined,
+    totalTokens: inputTokens + outputTokens || undefined,
+    costUsd: transcriptionCostUsd(settings.transcribeModel, audioSeconds),
+    rateMissing: !hasAudioRate(settings.transcribeModel),
+  };
+
+  return { text: parts.join("\n").trim(), rawSegments: raw, usage };
 }
 
 // Normalize whatever the model returns into "Speaker N: text" lines when diarization

@@ -30,6 +30,24 @@ function relTime(iso: string): string {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
+interface StageCost {
+  stage: "transcription" | "cleaning" | "analysis";
+  model: string;
+  calls: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  audioSeconds?: number;
+  costUsd: number;
+  rateMissing?: boolean;
+}
+interface CostBreakdown {
+  audioSeconds: number;
+  transcription: StageCost;
+  cleaning: StageCost;
+  analysis: StageCost;
+  totalUsd: number;
+}
 interface Meeting {
   id: number;
   fileName: string;
@@ -44,9 +62,24 @@ interface Meeting {
   unmappedSpeakers: string[];
   transcribeModel: string | null;
   postprocessModel: string | null;
+  cleanModel: string | null;
+  audioSeconds: number | null;
+  totalCostUsd: number | null;
+  cost: CostBreakdown | null;
   startedAt: string;
   finishedAt: string | null;
   actionItems: ActionItem[];
+}
+
+function usd(n: number): string {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`;
+}
+function mins(seconds: number): string {
+  return `${(seconds / 60).toFixed(1)} min`;
+}
+// A stage with no known rate shows "rate n/a" rather than a falsely-precise $0.
+function stageUsd(s: StageCost): string {
+  return s.rateMissing ? "rate n/a" : usd(s.costUsd);
 }
 
 export default function Dashboard() {
@@ -226,6 +259,32 @@ export default function Dashboard() {
               {m.attendees.length > 0 && (
                 <div className="kv">Attendees: {m.attendees.join(", ")}</div>
               )}
+              {m.cost &&
+                (() => {
+                  const c = m.cost;
+                  const incomplete =
+                    c.transcription.rateMissing ||
+                    c.cleaning.rateMissing ||
+                    c.analysis.rateMissing;
+                  return (
+                    <div className="kv">
+                      <b>
+                        {incomplete ? "≥ " : ""}
+                        {usd(c.totalUsd)}
+                      </b>{" "}
+                      · {mins(c.audioSeconds)} audio · transcription{" "}
+                      <span className="mono">{c.transcription.model}</span>{" "}
+                      {stageUsd(c.transcription)} · cleaning{" "}
+                      <span className="mono">{c.cleaning.model}</span> {stageUsd(c.cleaning)} (
+                      {c.cleaning.totalTokens ?? 0} tok) · analysis{" "}
+                      <span className="mono">{c.analysis.model}</span> {stageUsd(c.analysis)} (
+                      {c.analysis.totalTokens ?? 0} tok)
+                      {incomplete && (
+                        <span className="muted"> · some rates unknown</span>
+                      )}
+                    </div>
+                  );
+                })()}
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span className={`badge ${m.status}`}>{m.status}</span>

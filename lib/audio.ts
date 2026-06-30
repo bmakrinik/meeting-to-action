@@ -46,6 +46,9 @@ function getDuration(input: string): Promise<number> {
 export interface ExtractResult {
   // One or more audio chunks, each under the API size + duration caps, in order.
   chunks: string[];
+  // Total audio duration in seconds (already measured by ffmpeg; surfaced so the caller can
+  // cost transcription per-minute without a second ffmpeg pass).
+  durationSeconds: number;
 }
 
 const AUDIO_ARGS = [
@@ -78,7 +81,7 @@ export async function extract(
   if (duration <= chunkSeconds) {
     const out = path.join(WORK_DIR, `${safeId}.m4a`);
     await run(FFMPEG, ["-y", "-i", mp4Path, ...AUDIO_ARGS, out]);
-    return { chunks: [out] };
+    return { chunks: [out], durationSeconds: duration };
   }
 
   // Long: cut into fixed time windows, re-encoding each (accurate, container-agnostic).
@@ -99,7 +102,7 @@ export async function extract(
     ]);
     chunks.push(out);
   }
-  return { chunks };
+  return { chunks, durationSeconds: duration };
 }
 
 // Extract the whole meeting as a single 16 kHz mono audio file (no chunking),

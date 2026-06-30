@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { AppSettings } from "./settings";
+import { chatCostUsd, hasChatRate, type StageCost } from "./pricing";
 
 let _client: OpenAI | null = null;
 function client(): OpenAI {
@@ -25,7 +26,11 @@ export interface PostProcessResult {
   attendees: string[]; // participant names inferred from the transcript + roster
   host: string | null; // the person who led/organized the meeting, if identifiable
   unmappedSpeakers: string[]; // diarizer labels (e.g. "Speaker 2") not matched to a person
+  usage: { cleaning: StageCost; analysis: StageCost }; // per-stage token cost
 }
+
+// Minimal shape of the OpenAI chat usage object we read (CompletionUsage).
+type ChatUsage = { prompt_tokens?: number; completion_tokens?: number } | undefined;
 
 // Clean the transcript in chunks so a long meeting can never exceed the model's output
 // limit (which would silently truncate the middle). ~6000 chars in -> well under 4096 tokens out.
@@ -135,7 +140,7 @@ async function cleanChunk(
   glossary: string,
   knownTerms: string,
   model: string
-): Promise<string> {
+): Promise<{ text: string; usage: ChatUsage }> {
   const system = CLEAN_SYSTEM.replace("{GLOSSARY}", glossary).replace(
     "{KNOWN_TERMS}",
     knownTerms
@@ -148,7 +153,7 @@ async function cleanChunk(
       { role: "user", content: chunk },
     ],
   });
-  return resp.choices[0]?.message?.content?.trim() || chunk;
+  return { text: resp.choices[0]?.message?.content?.trim() || chunk, usage: resp.usage };
 }
 
 const ANALYSIS_SYSTEM = `You analyze meeting transcripts. A transcript may be in any language or mix languages.
@@ -254,6 +259,7 @@ async function analyze(
   attendees: string[];
   host: string | null;
   unmappedSpeakers: string[];
+  usage: ChatUsage;
 }> {
   const user =
     `KNOWN TERMS AND NAMES (correct spellings; map garbled mentions to these):\n${knownTerms}\n\n` +
@@ -297,6 +303,7 @@ async function analyze(
     unmappedSpeakers: Array.isArray(parsed.unmappedSpeakers)
       ? parsed.unmappedSpeakers.map((s: any) => String(s))
       : [],
+    usage: resp.usage,
   };
 }
 
@@ -328,12 +335,43 @@ export async function run(
   const cleanModel = settings.cleanModel || settings.postprocessModel;
   const chunks = splitForCleaning(transcript);
   const cleanedParts: string[] = [];
+  // Cleaning is many calls (one per chunk), so token usage must be summed across them.
+  let cleanPrompt = 0;
+  let cleanCompletion = 0;
   for (const c of chunks) {
-    cleanedParts.push(await cleanChunk(c, glossary, knownTerms, cleanModel));
+    const r = await cleanChunk(c, glossary, knownTerms, cleanModel);
+    cleanedParts.push(r.text);
+    cleanPrompt += r.usage?.prompt_tokens ?? 0;
+    cleanCompletion += r.usage?.completion_tokens ?? 0;
   }
   // Deterministic post-pass: guarantee exact glossary replacements and filler removal that
   // the LLM applies only inconsistently across a long transcript.
   const cleanedTranscript = stripFillers(applyGlossary(cleanedParts.join("\n\n"), settings));
+
+  const aPrompt = analysis.usage?.prompt_tokens ?? 0;
+  const aCompletion = analysis.usage?.completion_tokens ?? 0;
+  const usage = {
+    cleaning: {
+      stage: "cleaning",
+      model: cleanModel,
+      calls: chunks.length,
+      promptTokens: cleanPrompt,
+      completionTokens: cleanCompletion,
+      totalTokens: cleanPrompt + cleanCompletion,
+      costUsd: chatCostUsd(cleanModel, cleanPrompt, cleanCompletion),
+      rateMissing: !hasChatRate(cleanModel),
+    } as StageCost,
+    analysis: {
+      stage: "analysis",
+      model: settings.postprocessModel,
+      calls: 1,
+      promptTokens: aPrompt,
+      completionTokens: aCompletion,
+      totalTokens: aPrompt + aCompletion,
+      costUsd: chatCostUsd(settings.postprocessModel, aPrompt, aCompletion),
+      rateMissing: !hasChatRate(settings.postprocessModel),
+    } as StageCost,
+  };
 
   return {
     summary: analysis.summary,
@@ -343,5 +381,6 @@ export async function run(
     attendees: analysis.attendees,
     host: analysis.host,
     unmappedSpeakers: analysis.unmappedSpeakers,
+    usage,
   };
 }
