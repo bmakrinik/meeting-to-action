@@ -20,8 +20,8 @@ export interface RunSummary {
 // meeting title and timestamp, so two copies of the same meeting share this key while
 // different meetings (and recurring ones, which differ by timestamp) do not.
 function meetingKeyOf(name: string): string {
-  return name
-    .replace(/\.(mp4|m4a)$/i, "")
+  return drive
+    .stripMediaExt(name)
     .replace(/\s*-\s*recording\s*$/i, "")
     .toLowerCase()
     .replace(/\s+/g, " ")
@@ -158,11 +158,11 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
     const notionConfigured = !!(process.env.NOTION_TOKEN && dbId);
 
     if (notionConfigured) {
-      // Clean meeting title: drop ".mp4", a trailing " - Recording", and the trailing
-      // date/time/timezone (Meet appends it; it's already captured in Date & Time).
+      // Clean meeting title: drop the media extension, a trailing " - Recording", and the
+      // trailing date/time/timezone (Meet appends it; it's already captured in Date & Time).
       // "Google Ads - SEO - 2026/06/29 14:00 EEST - Recording.mp4" -> "Google Ads - SEO"
-      let title = file.name
-        .replace(/\.mp4$/i, "")
+      let title = drive
+        .stripMediaExt(file.name)
         .replace(/\s*-\s*recording\s*$/i, "")
         .replace(
           /\s*[-–]\s*\d{4}[/_.-]\d{2}[/_.-]\d{2}[ T_]+\d{2}[:_.]\d{2}(?:[:_.]\d{2})?(?:\s*[A-Za-z]{2,5})?\s*$/,
@@ -198,8 +198,11 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
       // Track whether an audio copy is confirmed present, so the immediate-delete path
       // below can apply the same "never delete a video without its audio" guard the
       // retention sweep enforces.
+      //
+      // Audio sources ARE the archival copy: there's no bulky video to shrink or trash,
+      // so skip retain-and-delete entirely for them (they're never auto-removed).
       let audioRetained = false;
-      if (file.source === "drive") {
+      if (file.isVideo && file.source === "drive") {
         const recFolder = file.folderId || recordingsFolderIds()[0];
         if (recFolder) {
           try {
@@ -225,7 +228,8 @@ export async function processFile(file: MeetingFile): Promise<RunSummary> {
       // fail an already-published run. (Retention sweep handles deferred deletion.)
       // Only delete once an audio copy is confirmed present, so a video is never removed
       // without its archival audio (e.g. if the retention upload above failed).
-      if (settings.deleteRecordingAfterProcessing) {
+      // Audio sources are the archive themselves and are never deleted here.
+      if (file.isVideo && settings.deleteRecordingAfterProcessing) {
         if (!audioRetained) {
           console.warn(
             `[pipeline] transcribed & published, but keeping "${file.name}": no audio ` +
@@ -312,6 +316,7 @@ export async function rerunByRunId(runId: number): Promise<RunSummary | null> {
     id: row.file_id,
     name: row.file_name,
     source: source as "local" | "drive",
+    isVideo: /\.mp4$/i.test(row.file_name),
     localPath:
       source === "local" && process.env.LOCAL_FIXTURE_DIR
         ? `${process.env.LOCAL_FIXTURE_DIR}/${row.file_id.replace("local:", "")}`
