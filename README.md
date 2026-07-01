@@ -7,13 +7,18 @@ A small Next.js app polls a Google Drive folder for new recordings, extracts the
 transcribes it with OpenAI, post-processes it into a summary + action items, and writes the
 result to Notion. It works for meetings in any language (including mixed-language meetings).
 
+It accepts both Google Meet `.mp4` recordings and standalone audio files
+(`.mp3`, `.m4a`, `.wav`, `.aac`, `.flac`, `.ogg`, `.opus`, `.webm`) — drop either into the
+recordings folder. Audio files are transcribed directly (ffmpeg just normalizes them);
+since an audio file is already small, the video-retention step below is skipped for it.
+
 ## How it works
 
 ```
-Drive folder (new .mp4)
+Drive folder (new .mp4 or audio file)
    -> download -> ffmpeg audio (chunked) -> OpenAI transcription
    -> OpenAI post-processing (clean transcript + summary + action items + attendees)
-   -> Notion page  (+ keep a small audio copy, trash the video after N days)
+   -> Notion page  (+ for videos: keep a small audio copy, trash the video after N days)
 ```
 
 - **Transcription:** OpenAI `gpt-4o-transcribe` (swappable in Settings; a diarizing model is
@@ -47,8 +52,8 @@ Key environment variables (see `.env.local.example`):
 - `OPENAI_API_KEY`
 - `NOTION_TOKEN`, `NOTION_DATABASE_ID` (share the database with your integration)
 - `GOOGLE_CREDENTIALS_PATH`, `MEET_RECORDINGS_FOLDER_ID` for Drive polling
-- `LOCAL_FIXTURE_DIR` to read `.mp4` files from a local folder instead of Drive (handy for
-  testing without Google credentials)
+- `LOCAL_FIXTURE_DIR` to read `.mp4` or audio files from a local folder instead of Drive
+  (handy for testing without Google credentials)
 - `BASIC_AUTH_USER` / `BASIC_AUTH_PASSWORD` to put the app behind HTTP Basic Auth (optional)
 
 The recordings folder(s) can also be set in the app's **Settings** UI, which supports

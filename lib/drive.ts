@@ -9,10 +9,39 @@ export interface MeetingFile {
   id: string; // Drive file id, or "local:<filename>" for fixtures
   name: string;
   source: "drive" | "local";
+  isVideo: boolean; // true for .mp4 recordings; false for standalone audio files
   localPath?: string; // populated for fixtures
   createdTime?: string; // ISO; when the recording was created (~ meeting time)
   folderId?: string; // the Drive folder it was found in (for audio retain-upload)
   calendar?: CalendarMeta; // organizer/guests, stamped on the file's description by the mover script
+}
+
+// Media inputs the app can transcribe: Meet's .mp4 recordings plus standalone audio
+// files. ffmpeg reads all of these (it probes by content), so the transcription
+// back-half is format-agnostic; this list only gates discovery.
+const AUDIO_EXTS = ["mp3", "m4a", "wav", "aac", "flac", "ogg", "opus", "webm"];
+const MEDIA_EXTS = ["mp4", ...AUDIO_EXTS];
+const MEDIA_EXT_RE = new RegExp(`\\.(${MEDIA_EXTS.join("|")})$`, "i");
+
+// Is this filename a media file we can ingest?
+export function isMediaFile(name: string): boolean {
+  return MEDIA_EXT_RE.test(name);
+}
+
+// Strip a supported media extension from a filename (used for titles and dedup keys).
+export function stripMediaExt(name: string): string {
+  return (name || "").replace(MEDIA_EXT_RE, "");
+}
+
+// The lowercased media extension of a filename ("mp4", "mp3", ...), or "" if none.
+function mediaExt(name: string): string {
+  const m = name.match(MEDIA_EXT_RE);
+  return m ? m[1].toLowerCase() : "";
+}
+
+// A file is treated as video only when it's an .mp4; everything else is audio.
+function isVideoName(name: string): boolean {
+  return /\.mp4$/i.test(name);
 }
 
 // Calendar info the per-user mover script writes into the recording's Drive description
@@ -57,13 +86,14 @@ function listLocalFixtures(): MeetingFile[] {
   if (!dir || !fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
-    .filter((f) => f.toLowerCase().endsWith(".mp4"))
+    .filter((f) => isMediaFile(f))
     .map((f) => {
       const full = path.join(dir, f);
       return {
         id: `local:${f}`,
         name: f,
         source: "local" as const,
+        isVideo: isVideoName(f),
         localPath: full,
         createdTime: safeMtime(full),
       };
@@ -128,8 +158,9 @@ async function listDriveFiles(): Promise<MeetingFile[]> {
     let pageToken: string | undefined;
     do {
       const res = await drive.files.list({
-        q: `'${folderId}' in parents and mimeType = 'video/mp4' and trashed = false`,
-        fields: "nextPageToken, files(id, name, createdTime, description)",
+        // Meet's .mp4 recordings plus any audio/* file dropped in the folder.
+        q: `'${folderId}' in parents and (mimeType = 'video/mp4' or mimeType contains 'audio/') and trashed = false`,
+        fields: "nextPageToken, files(id, name, mimeType, createdTime, description)",
         orderBy: "createdTime",
         pageSize: 100,
         // Required so a folder living in a Shared Drive is traversed.
@@ -137,15 +168,21 @@ async function listDriveFiles(): Promise<MeetingFile[]> {
         includeItemsFromAllDrives: true,
         pageToken,
       });
-      for (const f of res.data.files || [])
+      for (const f of res.data.files || []) {
+        const name = f.name || f.id!;
+        // Skip audio/* results whose extension we don't support (keeps behavior
+        // predictable and consistent with the local-fixture allowlist).
+        if (!isMediaFile(name)) continue;
         out.push({
           id: f.id!,
-          name: f.name || f.id!,
+          name,
           source: "drive" as const,
+          isVideo: f.mimeType === "video/mp4" || isVideoName(name),
           createdTime: f.createdTime || undefined,
           folderId,
           calendar: parseCalendarMeta(f.description),
         });
+      }
       pageToken = res.data.nextPageToken || undefined;
     } while (pageToken);
   }
@@ -182,12 +219,14 @@ export async function listNew(): Promise<MeetingFile[]> {
   return all.filter((f) => !isProcessed(f.id));
 }
 
-// Download (or copy) an MP4 to the work dir and return its local path.
+// Download (or copy) a recording to the work dir and return its local path. Keeps the
+// source's own extension (mp4/mp3/wav/...) so the working copy reflects its real format.
 export async function download(file: MeetingFile): Promise<string> {
   if (file.source === "local") {
     return file.localPath!;
   }
-  const dest = path.join(WORK_DIR, `${file.id}.mp4`);
+  const ext = mediaExt(file.name) || "mp4";
+  const dest = path.join(WORK_DIR, `${file.id}.${ext}`);
   const drive = driveClient();
   const res = await drive.files.get(
     { fileId: file.id, alt: "media", supportsAllDrives: true },
